@@ -1,0 +1,64 @@
+*.py[cod]
+__pycache__
+.DS_Store
+
+# C extensions
+*.so
+
+# Packages
+*.egg
+*.egg-info
+dist
+build
+eggs
+parts
+var
+sdist
+develop-eggs
+.installed.cfg
+lib
+lib64
+wheelhouse
+
+# Installer logs
+pip-log.txt
+
+# Unit test / coverage reports
+.coverage
+.tox
+coverage.xml
+nosetests.xml
+htmlcov
+junit.xml
+.cache
+
+# Code stats
+clonedigger.xml
+
+# Translations
+*.mo
+
+# Complexity
+output/*.html
+output/*/index.html
+
+# Sphinx
+docs/_build
+
+# IDE's
+.idea
+*~
+
+# py.test
+pytestdebug.log
+
+# dynamodb local
+*.db
+*.sqlite
+
+# Vagrant
+.vagrant/
+
+#junk
+*.pid
+*.backup
