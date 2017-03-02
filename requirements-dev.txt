@@ -1,0 +1,9 @@
+wheel
+pep8
+pudb
+radon
+pytest-cov
+pytest
+tox
+awscli
+-e .
