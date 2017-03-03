@@ -13,6 +13,7 @@ Usage:
     dynotool export <TABLE> --type <TYPE> --out <FILE> [--num <RECORDS> --profile <PROFILE>]
 
 Options:
+    -? --help               Usage help.
     info                    Get info on the specified table
     head                    Get the first 20 records from the table
     --type <TYPE>           Export type, supported types are TSV and CSV
@@ -119,15 +120,15 @@ def main():
                                 elif v.get('N'):
                                     data[k] = NumberAttribute().deserialize(v['N'])
 
-                        if consumed_capacity / read_capacity >= 0.6:
-                            status_char = '*'
-                        elif consumed_capacity / read_capacity >= 0.8:
+                        if consumed_capacity / read_capacity >= 0.9:
                             status_char = '!'
+                        elif consumed_capacity / read_capacity >= 0.65:
+                            status_char = '*'
                         else:
                             status_char = '.'
 
-                        if ix % 1000 == 0:
-                            print('-', end='', flush=True)
+                        if rows_received % 1000 == 0:
+                            print(rows_received, end='', flush=True)
                         else:
                             print(status_char, end='', flush=True)
                         rows_received += 1
