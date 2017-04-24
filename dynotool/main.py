@@ -10,7 +10,9 @@ Tools for making life with DynamoDB easier
 Usage:
     dynotool info <TABLE> [--profile <PROFILE>]
     dynotool head <TABLE> [--profile <PROFILE>]
+    dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <PROFILE>]
     dynotool export <TABLE> --type <TYPE> --out <FILE> [--num <RECORDS> --profile <PROFILE>]
+    
 
 Options:
     -? --help               Usage help.
@@ -26,7 +28,10 @@ from __future__ import print_function, unicode_literals, absolute_import
 
 import os
 import csv
+from pprint import pprint
+
 import boto3
+import time
 from botocore.exceptions import ClientError
 from pynamodb.attributes import MapAttribute, UnicodeAttribute, NumberAttribute
 import sys
@@ -47,6 +52,7 @@ def get_table_info(client, table_name):
 def main():
     arguments = docopt(__doc__)
     print('CloudZero Dyn-O-Tool! v{}'.format(__version__))
+    print('-' * 120)
 
     aws_profile = arguments.get('--profile') or 'default'
 
@@ -66,6 +72,70 @@ def main():
             if result['Count'] > 0:
                 for record in result['Items']:
                     print(record)
+
+    elif arguments['copy']:
+        source_table = arguments['<SRC_TABLE>']
+        dest_table = arguments['<DEST_TABLE>']
+        table_list = client.list_tables()['TableNames']
+        if source_table in table_list and dest_table not in table_list:
+            source_table_info = get_table_info(client, source_table)
+
+            try:
+                del source_table_info['ProvisionedThroughput']['NumberOfDecreasesToday']
+                del source_table_info['ProvisionedThroughput']['LastIncreaseDateTime']
+                del source_table_info['ProvisionedThroughput']['LastDecreaseDateTime']
+            except KeyError:
+                pass
+
+            dest_table_config = {'TableName': dest_table,
+                                 'AttributeDefinitions': source_table_info['AttributeDefinitions'],
+                                 'KeySchema': source_table_info['KeySchema'],
+                                 'ProvisionedThroughput': source_table_info['ProvisionedThroughput']}
+
+            if source_table_info.get('LocalSecondaryIndexes'):
+                dest_table_config['LocalSecondaryIndexes'] = source_table_info['LocalSecondaryIndexes']
+            if source_table_info.get('GlobalSecondaryIndexes'):
+                dest_table_config['GlobalSecondaryIndexes'] = source_table_info['GlobalSecondaryIndexes']
+            if source_table_info.get('StreamSpecification'):
+                dest_table_config['StreamSpecification'] = source_table_info['StreamSpecification']
+
+            print('Extracted source table configuration:')
+            pprint(dest_table_config)
+            dest_table_info = client.create_table(**dest_table_config)['TableDescription']
+            print('Creating {}'.format(dest_table), end='')
+            wait_count = 0
+            while dest_table_info['TableStatus'] != 'ACTIVE':
+                print('.', end='', flush=True)
+                time.sleep(0.2)
+                dest_table_info = get_table_info(client, dest_table)
+                wait_count += 1
+                if wait_count > 50:
+                    print('ERROR: Table creation taking too long, unsure why, exiting.')
+                    pprint(dest_table_info)
+                    sys.exit(1)
+
+            print('success')
+
+            results = []
+            scan_result = {'Count': -1, 'ScannedCount': 1}
+            print('Reading data from {}'.format(source_table), end='')
+            while scan_result['Count'] != scan_result['ScannedCount']:
+                scan_result = client.scan(TableName=source_table, Select='ALL_ATTRIBUTES')
+                results += scan_result['Items']
+                print('.', end='', flush=True)
+
+            print(".Done\n{} Records loaded from {}".format(len(results), source_table))
+
+            # todo Convert to use batch write item
+            print("Loading records into {}".format(dest_table), end='')
+            write_count = 0
+            for item in results:
+                client.put_item(TableName=dest_table, Item=item)
+                print('.', end='', flush=True)
+                write_count += 1
+            print('Done! {} records written'.format(write_count))
+        else:
+            print('Destination table {} already exists, unable to complete copy.'.format(dest_table))
     elif arguments['export']:
         table_info = get_table_info(client, arguments['<TABLE>'])
         read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
@@ -99,7 +169,8 @@ def main():
                 if rows_to_get:
                     kwargs['Limit'] = rows_to_get - rows_received
 
-                result = client.scan(TableName=arguments['<TABLE>'], ReturnConsumedCapacity="TOTAL", **kwargs)
+                result = client.scan(TableName=arguments['<TABLE>'], ReturnConsumedCapacity="TOTAL",
+                                     Select="ALL_ATTRIBUTES", **kwargs)
                 consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
                 max_capacity = max(max_capacity, consumed_capacity)
 
