@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/Cloudzero/dynotool.svg?branch=master)](https://travis-ci.org/Cloudzero/dynotool)
+
 # Dyn-O-Tool
 
 Tools for easier living with AWS DynamoDB
