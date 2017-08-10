@@ -8,17 +8,19 @@ CloudZero Dyn-O-Tool!
 Tools for making life with DynamoDB easier
 
 Usage:
+    dynotool list [--profile <PROFILE>]
     dynotool info <TABLE> [--profile <PROFILE>]
     dynotool head <TABLE> [--profile <PROFILE>]
     dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <PROFILE>]
-    dynotool export <TABLE> --type <TYPE> --out <FILE> [--num <RECORDS> --profile <PROFILE>]
-    
+    dynotool export <TABLE> --out <FILE> [--type <TYPE> --num <RECORDS> --profile <PROFILE>]
+
 
 Options:
     -? --help               Usage help.
+    list                    List all DyanmoDB tables currently provisioned
     info                    Get info on the specified table
     head                    Get the first 20 records from the table
-    --type <TYPE>           Export type, supported types are TSV and CSV
+    --type <TYPE>           Export type, currently only supported type is JSON [default: json]
     --num <RECORDS>         Number of records to export
     --out <FILE>            File to export data to
     --profile <PROFILE>     AWS Profile to use (optional)
@@ -26,14 +28,14 @@ Options:
 
 from __future__ import print_function, unicode_literals, absolute_import
 
+import json
 import os
-import csv
+import timeit
 from pprint import pprint
 
 import boto3
 import time
 from botocore.exceptions import ClientError
-from pynamodb.attributes import MapAttribute, UnicodeAttribute, NumberAttribute
 import sys
 from docopt import docopt
 
@@ -59,7 +61,20 @@ def main():
     session = boto3.Session(profile_name=aws_profile)
     client = session.client('dynamodb')
 
-    if arguments['info']:
+    if arguments['list']:
+        done = False
+        while not done:
+            response = client.list_tables()
+            table_list = response['TableNames']
+            for table_name in table_list:
+                table_info = get_table_info(client, table_name)
+                print("{:<40} {} ~{:>10} records ({:,.2f} mb)".format(table_name, table_info['TableStatus'],
+                                                                      table_info['ItemCount'],
+                                                                      table_info['TableSizeBytes'] / (1024 * 1024)))
+            if len(table_list) <= 100:
+                done = True
+
+    elif arguments['info']:
         table_info = get_table_info(client, arguments['<TABLE>'])
         if table_info:
             print('Table {} is {}'.format(arguments['<TABLE>'], table_info['TableStatus']))
@@ -140,84 +155,76 @@ def main():
         table_info = get_table_info(client, arguments['<TABLE>'])
         read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
-        if arguments['--type'].lower() == 'csv':
-            delimiter = ','
-        elif arguments['--type'].lower() == 'tsv':
-            delimiter = '\t'
-        else:
+        if arguments['--type'] != 'json':
             print('Unsupported export type {}'.format(arguments['--type']))
-            return 1
+            sys.exit(1)
 
-        csv_filename = os.path.expanduser(arguments['--out'])
-        field_names = ['event_id', 'event_timestamp', 'event_time', 'event_type', 'event_version',
-                       'event_name', 'event_region', 'env_id', 'event_size', 'event', 'source_env_id',
-                       'source_message', 'source_message_time']
-        with open(csv_filename, 'w', newline='') as csvfile:
-            csvwriter = csv.DictWriter(csvfile, fieldnames=field_names, delimiter=delimiter)
-            csvwriter.writeheader()
-
-            print('Exporting {} to {}'.format(arguments['<TABLE>'], arguments['--type']))
-
+        output_filename = os.path.expanduser(arguments['--out'])
+        with open(output_filename, 'w', newline='\n') as outfile:
+            print('Exporting {} to {}, read capacity is {}'.format(arguments['<TABLE>'],
+                                                                   arguments['--type'],
+                                                                   read_capacity))
             kwargs = {}
             done = False
-            ix = 0
-            rows_received = 0
+            request_count = 0
             rows_to_get = int(arguments.get('--num') or 0)
+            rows_received = 0
             max_capacity = 0
+            retries = 0
+            start = timeit.default_timer()
             while not done:
-                ix += 1
-                if rows_to_get:
-                    kwargs['Limit'] = rows_to_get - rows_received
+                try:
+                    request_count += 1
+                    if rows_to_get:
+                        kwargs['Limit'] = rows_to_get - rows_received
 
-                result = client.scan(TableName=arguments['<TABLE>'], ReturnConsumedCapacity="TOTAL",
-                                     Select="ALL_ATTRIBUTES", **kwargs)
-                consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
-                max_capacity = max(max_capacity, consumed_capacity)
+                    result = client.scan(TableName=arguments['<TABLE>'],
+                                         ReturnConsumedCapacity="TOTAL",
+                                         Select="ALL_ATTRIBUTES", **kwargs)
+                    consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
+                    max_capacity = max(max_capacity, consumed_capacity)
 
-                if result.get('LastEvaluatedKey'):
-                    kwargs['ExclusiveStartKey'] = result.get('LastEvaluatedKey')
-                else:
-                    done = True
+                    if result.get('LastEvaluatedKey'):
+                        kwargs['ExclusiveStartKey'] = result.get('LastEvaluatedKey')
+                    else:
+                        done = True
 
-                if result['Count'] > 0:
-                    data = {}
+                    if rows_to_get and (rows_received >= rows_to_get):
+                        done = True
+
+                    # if result['Count'] > 0:
                     for record in result['Items']:
-                        for k, v in record.items():
-                            if k in field_names:
-                                if v.get('M'):
-                                    data[k] = MapAttribute().deserialize(v['M'])
-                                elif v.get('S'):
-                                    data[k] = UnicodeAttribute().deserialize(v['S'])
-                                elif v.get('N'):
-                                    data[k] = NumberAttribute().deserialize(v['N'])
-
-                        if consumed_capacity / read_capacity >= 0.9:
-                            status_char = '!'
-                        elif consumed_capacity / read_capacity >= 0.65:
-                            status_char = '*'
-                        else:
-                            status_char = '.'
-
-                        if rows_received % 1000 == 0:
-                            print(rows_received, end='', flush=True)
-                        else:
-                            print(status_char, end='', flush=True)
+                        outfile.write("{}\n".format(json.dumps(record)))
                         rows_received += 1
 
-                        csvwriter.writerow(data)
+                    # if rows_received % 1000 == 0:
+                    if consumed_capacity / read_capacity >= 0.9:
+                        print("!", end='', flush=True)
+                    elif consumed_capacity / read_capacity >= 0.65:
+                        print("*", end='', flush=True)
+                    else:
+                        print(".", end='', flush=True)
 
-                if rows_to_get and (rows_received >= rows_to_get):
-                    done = True
+                except ClientError as err:
+                    if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
+                                                             'ThrottlingException'):
+                        raise
+                    print('<' * retries)
+                    time.sleep(2 ** retries)
+                    retries += 1
 
-        print('\nExport complete: {} rows exported to {} '
-              '(in {} request(s), max consumed capacity: {})'.format(rows_received,
-                                                                     csv_filename,
-                                                                     ix,
-                                                                     max_capacity))
+        stop = timeit.default_timer()
+        total_time = stop - start
+        avg_row_processing_time = rows_received / total_time
+        print('\nExport complete: {} rows exported in {:.2f} seconds (~{:.2f} rps) '
+              'in {} request(s), max consumed capacity: {}'.format(rows_received,
+                                                                   total_time,
+                                                                   avg_row_processing_time,
+                                                                   request_count,
+                                                                   max_capacity))
 
-    return 0
+        return 0
 
-
-if __name__ == "__main__":
-    status = main()
-    sys.exit(status)
+    if __name__ == "__main__":
+        status = main()
+        sys.exit(status)

@@ -62,3 +62,6 @@ pytestdebug.log
 #junk
 *.pid
 *.backup
+
+node_modules
+.serverless

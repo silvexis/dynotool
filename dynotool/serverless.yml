@@ -1,0 +1,49 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) CloudZero, Inc. All rights reserved.
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
+service: dyn-o-tool
+
+plugins:
+  - serverless-prune-plugin
+
+provider:
+  name: aws
+
+  stage: ${opt:stage, self:custom.defaultStage}
+  profile: ${opt:aws-profile, env:AWS_PROFILE, env:AWS_DEFAULT_PROFILE, self:custom.defaultProfile}
+  stackTags:
+    cloudzero:service: ${self:service}
+
+  runtime: python3.6
+  timeout: 300
+  environment:
+    PYTHONPATH: "/var/runtime:/var/task/vendored"
+    NAMESPACE: ${self:provider.stage}
+    LOG_LEVEL: INFO
+  iamRoleStatements:
+  - Effect: Allow
+    Action: # Give permission to CZ Reactor DynamoDB tables
+      - "dynamodb:*"
+    Resource: "arn:aws:dynamodb:*:*:table/cz*"
+  - Effect: Allow
+    Action:
+      - "lambda:*"
+    Resource: "*"
+  - Effect: "Allow"
+    Action:
+      - "s3:*"
+    Resource: "*"
+
+custom:
+  defaultStage: dev
+  defaultProfile: default
+  prune:
+    automatic: true
+    number: 3
+
+functions:
+  dump-table:
+    handler: functions.dump_table
+  dump-table-launcher:
+    handler: functions.dump_table_launcher
