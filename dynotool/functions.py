@@ -5,6 +5,7 @@ import os
 
 import boto3
 import time
+import gzip
 from botocore.exceptions import ClientError
 
 
@@ -14,15 +15,19 @@ def dump_table_launcher(event, context):
     payload = {'s3_bucket': event['s3_bucket'],
                'src_table': event['src_table']}
 
-    total_segments = int(event.get('total_segments'))
+    total_segments = int(event.get('total_segments', 1))
 
-    for i in range(total_segments - 1):
+    launch_status = []
+    for i in range(total_segments):
         if total_segments:
             payload['total_segments'] = total_segments
             payload['segment'] = i
-        lam.invoke(FunctionName='dyn-o-tool-{}-dump-table'.format(namespace),
-                   InvocationType='Event',
-                   Payload=json.dumps(payload))
+        response = lam.invoke(FunctionName='dyn-o-tool-{}-dump-table'.format(namespace),
+                              InvocationType='Event',
+                              Payload=json.dumps(payload))
+        launch_status.append(response['StatusCode'])
+
+    print('Launched {} functions {}'.format(len(launch_status), launch_status))
 
 
 def dump_table(event, context):
@@ -58,10 +63,12 @@ def dump_table(event, context):
 
             rows_received += len(result['Items'])
             contents = "\n".join([json.dumps(x, default=str) for x in result['Items']])
-            data = io.StringIO(contents)
-            s3.put_object(Bucket=event['s3_bucket'], Key="data{}-{}.json".format(request_count,
-                                                                                 event.get('segment', 1)),
-                          Body=data.read())
+            if contents:
+                data = io.StringIO(contents)
+                s3.put_object(Bucket=event['s3_bucket'], Key="{}_{}-{}.json".format(event['src_table'],
+                                                                                    request_count,
+                                                                                    event.get('segment', 1)),
+                              Body=data.read())
 
         except ClientError as err:
             if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
