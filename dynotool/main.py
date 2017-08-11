@@ -38,6 +38,7 @@ from __future__ import print_function, unicode_literals, absolute_import
 import json
 import timeit
 from pprint import pprint
+import os
 
 import boto3
 import time
@@ -71,7 +72,7 @@ def check_input_output_target(output_destination):
         if not output_destination.endswith('.json'):
             output_destination += '.json'
 
-        return output_destination, "file"
+        return os.path.abspath(output_destination), "file"
 
 
 def chunks(l, n):
@@ -188,11 +189,11 @@ def main():
             print('Unsupported export type {}'.format(arguments['--type']))
             sys.exit(1)
 
-        input_source, input_type = check_input_output_target(arguments['--file'] or arguments['<TABLE>'])
+        export_dest, export_type = check_input_output_target(arguments['--file'] or arguments['<TABLE>'])
 
         if arguments['--type'] == EXPORT_TYPE_PARALLEL:
             payload = {
-                "s3_bucket": input_source,
+                "s3_bucket": export_dest,
                 "src_table": arguments['<TABLE>'],
                 "total_segments": arguments['--segments']
             }
@@ -201,7 +202,7 @@ def main():
                                   Payload=json.dumps(payload))
             if response['StatusCode'] == 202:
                 print('Parallel table dump started for {} to s3://{}'.format(arguments['<TABLE>'],
-                                                                             input_source))
+                                                                             export_dest))
             else:
                 print("Something went wrong, I'm not sure what sorry!")
                 pprint(response)
@@ -210,8 +211,8 @@ def main():
             table_info = get_table_info(dynamodb, arguments['<TABLE>'])
             read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
-            if input_type == 'file':
-                with open(input_source, 'w', newline='\n') as outfile:
+            if export_type == 'file':
+                with open(export_dest, 'w', newline='\n') as outfile:
                     print('Exporting {} to {}, read capacity is {}'.format(arguments['<TABLE>'],
                                                                            arguments['--type'],
                                                                            read_capacity))
@@ -269,61 +270,108 @@ def main():
                 print('Other output types for sequential exporter are not supported at this time')
 
     elif arguments['import']:
-        input_source, input_type = check_input_output_target(arguments['--file'])
-        # table_info = get_table_info(dynamodb, arguments['<TABLE>'])
-        # write_capacity = table_info['ProvisionedThroughput']['WriteCapacityUnits']
+        input_source, import_type = check_input_output_target(arguments['--file'])
         write_capacity = 0
         target_table_name = arguments['<TABLE>']
-        print('Importing {} to table {} ({} write capacity)'.format(arguments['--file'],
+        print('Importing {} to table {} ({} write capacity)'.format(input_source,
                                                                     target_table_name,
                                                                     write_capacity))
-        bucket = s3.Bucket(input_source)
-        done = False
-        request_count = 0
-        rows_received = 0
-        max_capacity = 0
-        retries = 0
-        start = timeit.default_timer()
-        while not done:
-            try:
-                request_count += 1
-                for obj in bucket.objects.all():
-                    print(obj.key)
-                    response = obj.get()
-                    data = response['Body'].read().decode('utf-8')
-                    prepared_data = [{'PutRequest': {'Item': json.loads(x)}} for x in data.splitlines()]
-                    for chunk in chunks(prepared_data, 25):
-                        dynamodb.batch_write_item(RequestItems={target_table_name: chunk})
+        if import_type == 'file':
+            done = False
+            request_count = 0
+            rows_received = 0
+            max_capacity = 0
+            retries = 0
+            start = timeit.default_timer()
+            while not done:
+                try:
+                    request_count += 1
+                    with open(input_source, 'r') as fp:
+                        # print(obj.key)
+                        # response = obj.get()
+                        # data = response['Body'].read().decode('utf-8')
+                        prepared_data = [{'PutRequest': {'Item': json.loads(x)}} for x in fp.readlines()]
+                        rows_received = len(prepared_data)
+                        print('Importing {} records'.format(rows_received))
+                        for chunk in chunks(prepared_data, 25):
+                            response = dynamodb.batch_write_item(RequestItems={target_table_name: chunk})
+                            print(".", end='', flush=True)
+                            unprocessed_items = response.get('UnprocessedItems')
+                            while unprocessed_items:
+                                response = dynamodb.batch_write_item(RequestItems=unprocessed_items)
+                                if response.get('UnprocessedItems'):
+                                    unprocessed_items = response.get('UnprocessedItems')
+                                    print('<', end='', flush=True)
+                                    time.sleep(2 ** retries)
+                                    retries += 1
 
-                done = True
+                    done = True
 
-                # consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
-                # max_capacity = max(max_capacity, consumed_capacity)
-                #
-                # if consumed_capacity / write_capacity >= 0.9:
-                #     print("!", end='', flush=True)
-                # elif consumed_capacity / write_capacity >= 0.65:
-                #     print("*", end='', flush=True)
-                # else:
-                #     print(".", end='', flush=True)
+                except ClientError as err:
+                    if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
+                                                             'ThrottlingException'):
+                        raise
+                    print('<' * retries)
+                    time.sleep(2 ** retries)
+                    retries += 1
 
-            except ClientError as err:
-                if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
-                                                         'ThrottlingException'):
-                    raise
-                print('<' * retries)
-                time.sleep(2 ** retries)
-                retries += 1
+                stop = timeit.default_timer()
+                total_time = stop - start
+                avg_row_processing_time = rows_received / total_time
+                print('\nImport complete: {} rows imported in {:.2f} seconds (~{:.2f} rps) '
+                      'in {} request(s), max consumed capacity: {}'.format(rows_received,
+                                                                           total_time,
+                                                                           avg_row_processing_time,
+                                                                           request_count,
+                                                                           max_capacity))
+        elif import_type == 'S3':
+            bucket = s3.Bucket(input_source)
+            done = False
+            request_count = 0
+            rows_received = 0
+            max_capacity = 0
+            retries = 0
+            start = timeit.default_timer()
+            while not done:
+                try:
+                    request_count += 1
+                    for obj in bucket.objects.all():
+                        print(obj.key)
+                        response = obj.get()
+                        data = response['Body'].read().decode('utf-8')
+                        prepared_data = [{'PutRequest': {'Item': json.loads(x)}} for x in data.splitlines()]
+                        for chunk in chunks(prepared_data, 25):
+                            dynamodb.batch_write_item(RequestItems={target_table_name: chunk})
 
-        stop = timeit.default_timer()
-        total_time = stop - start
-        avg_row_processing_time = rows_received / total_time
-        print('\nImport complete: {} rows imported in {:.2f} seconds (~{:.2f} rps) '
-              'in {} request(s), max consumed capacity: {}'.format(rows_received,
-                                                                   total_time,
-                                                                   avg_row_processing_time,
-                                                                   request_count,
-                                                                   max_capacity))
+                    done = True
+
+                    # consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
+                    # max_capacity = max(max_capacity, consumed_capacity)
+                    #
+                    # if consumed_capacity / write_capacity >= 0.9:
+                    #     print("!", end='', flush=True)
+                    # elif consumed_capacity / write_capacity >= 0.65:
+                    #     print("*", end='', flush=True)
+                    # else:
+                    #     print(".", end='', flush=True)
+
+                except ClientError as err:
+                    if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
+                                                             'ThrottlingException'):
+                        raise
+                    print('<' * retries)
+                    time.sleep(2 ** retries)
+                    retries += 1
+
+            stop = timeit.default_timer()
+            total_time = stop - start
+            avg_row_processing_time = rows_received / total_time
+            print('\nImport complete: {} rows imported in {:.2f} seconds (~{:.2f} rps) '
+                  'in {} request(s), max consumed capacity: {}'.format(rows_received,
+                                                                       total_time,
+                                                                       avg_row_processing_time,
+                                                                       request_count,
+                                                                       max_capacity))
     elif arguments['wipe']:
         table_name = arguments['<TABLE>']
         print('Wiping table {} (via remove and recreate)'.format(table_name))
