@@ -15,6 +15,7 @@ Usage:
     dynotool export <TABLE> [--file <file> --type <type> --profile <name> --namespace <name> --segments <num>]
     dynotool import <TABLE> --file <file> [--profile <name>]
     dynotool wipe <TABLE> [--profile <name>]
+    dynotool truncate <TABLE> [--filter <filter>] [--profile <name>]
 
 
 Options:
@@ -25,10 +26,12 @@ Options:
     copy                    Copy the data from SRC TABLE to DEST TABLE
     export                  Export TABLE to file or S3 bucket
     import                  Import file or S3 bucket into TABLE
-    wipe                    Wipe an existing DynamoDB Table by recreating it (delete and create)
+    wipe                    Wipe an existing table by recreating it (delete and create)
+    truncate                Wipe an existing table by deleting all records
     --type <type>           Export type, either sequential or parallel [default: sequential].
     --file <file>           File or S3 bucket to import or export data to, defaults to table name.
     --profile <profile>     AWS Profile to use (optional) [default: default].
+    --filter <filter>       A filter to apply to the operation. The syntax depends on the operation.
     --namespace <name>      Namespace to use when calling remote functions [default: dev].
     --segments <num>        Number of segments to break a parallel export into [default: 10].
 """
@@ -37,8 +40,10 @@ from __future__ import print_function, unicode_literals, absolute_import
 
 import json
 import timeit
+from functools import partial
 from pprint import pprint
 import os
+from random import randrange
 
 import boto3
 import time
@@ -91,6 +96,7 @@ def main():
 
     session = boto3.Session(profile_name=aws_profile)
     dynamodb = session.client('dynamodb')
+    dynamodb_resource = session.resource('dynamodb')
     lam = session.client('lambda')
     s3 = session.resource('s3')
 
@@ -384,8 +390,67 @@ def main():
         response = dynamodb.create_table(**table_definition)
         dynamodb.get_waiter('table_exists').wait(TableName=table_name)
         print(' - Table recreated, finished')
+    elif arguments['truncate']:
+        table_name = arguments['<TABLE>']
+        print('Wiping table {} (by truncating)'.format(table_name))
+        result = delete_all_items(session, table_name, arguments['--filter'])
+        print(result)
 
     return 0
+
+
+def delete_all_items(session, table_name, filter=None):
+    client = session.client('dynamodb')
+    resource = session.resource('dynamodb')
+    table = resource.Table(table_name)
+    # Deletes all items from a DynamoDB table.
+    # You need to confirm your intention by pressing Enter.
+    response = client.describe_table(TableName=table_name)
+    aprox_item_count = response['Table']['ItemCount']
+    keys = [k['AttributeName'] for k in response['Table']['KeySchema']]
+    scan_args = {}
+
+    if filter:
+        scan_args['ScanFilter'] = json.loads(filter)
+    response = table.scan(**scan_args)
+
+    items = response['Items']
+    number_of_items = len(items)
+    if number_of_items == 0:  # no items to delete
+        print("Table '{}' is empty.".format(table_name))
+        return
+
+    print("You are about to delete {} items (out of {}) from table '{}'.".format(number_of_items,
+                                                                                 aprox_item_count,
+                                                                                 table_name))
+    print("Sample Event:")
+    pprint(items[randrange(0, number_of_items)])
+    input("Press Enter to continue...")
+
+    count = 0
+    item = None
+    while response.get('LastEvaluatedKey') or count == 0:
+        count += 1
+        try:
+            with table.batch_writer() as batch:
+                for item in items:
+                    key_dict = {k: item[k] for k in keys}
+                    # print("Deleting {}".format(key_dict))
+                    print('.', end='', flush=True)
+                    batch.delete_item(Key=key_dict)
+                    count += 1
+        except Exception as error:
+            print(error)
+            print(item)
+        if response.get('LastEvaluatedKey'):
+            scan_args['ExclusiveStartKey'] = response.get('LastEvaluatedKey')
+        response = table.scan(**scan_args)
+        items = response['Items']
+        number_of_items = len(items)
+        print("-" * 120)
+        print('Found {} more to delete'.format(number_of_items))
+
+    return count
 
 
 def extract_table_definition(description):
