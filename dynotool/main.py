@@ -131,7 +131,7 @@ def main():
         source_table = arguments['<SRC_TABLE>']
         dest_table = arguments['<DEST_TABLE>']
         table_list = dynamodb.list_tables()['TableNames']
-        if source_table in table_list and dest_table not in table_list:
+        if source_table in table_list:
             source_table_info = get_table_info(dynamodb, source_table)
 
             try:
@@ -154,21 +154,22 @@ def main():
                 dest_table_config['StreamSpecification'] = source_table_info['StreamSpecification']
 
             print('Extracted source table configuration:')
-            pprint(dest_table_config)
-            dest_table_info = dynamodb.create_table(**dest_table_config)['TableDescription']
-            print('Creating {}'.format(dest_table), end='')
-            wait_count = 0
-            while dest_table_info['TableStatus'] != 'ACTIVE':
-                print('.', end='', flush=True)
-                time.sleep(0.2)
-                dest_table_info = get_table_info(dynamodb, dest_table)
-                wait_count += 1
-                if wait_count > 50:
-                    print('ERROR: Table creation taking too long, unsure why, exiting.')
-                    pprint(dest_table_info)
-                    sys.exit(1)
+            if dest_table not in table_list:
+                pprint(dest_table_config)
+                dest_table_info = dynamodb.create_table(**dest_table_config)['TableDescription']
+                print('Creating {}'.format(dest_table), end='')
+                wait_count = 0
+                while dest_table_info['TableStatus'] != 'ACTIVE':
+                    print('.', end='', flush=True)
+                    time.sleep(0.2)
+                    dest_table_info = get_table_info(dynamodb, dest_table)
+                    wait_count += 1
+                    if wait_count > 50:
+                        print('ERROR: Table creation taking too long, unsure why, exiting.')
+                        pprint(dest_table_info)
+                        sys.exit(1)
 
-            print('success')
+                print('success')
 
             results = []
             scan_result = {'Count': -1, 'ScannedCount': 1}
@@ -188,8 +189,7 @@ def main():
                 print('.', end='', flush=True)
                 write_count += 1
             print('Done! {} records written'.format(write_count))
-        else:
-            print('Destination table {} already exists, unable to complete copy.'.format(dest_table))
+
     elif arguments['export']:
         if arguments['--type'] not in EXPORT_TYPES:
             print('Unsupported export type {}'.format(arguments['--type']))
