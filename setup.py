@@ -25,8 +25,8 @@ setup(
     package_data={'dynotool': ['data/*']},
     include_package_data=True,
     install_requires=[
-        'docopt>=0.6.2,<0.6.99',
-        'boto3>=1.4.4,<1.4.99',
+        'docopt',
+        'boto3',
         'pynamodb',
         'botocore'
     ],
