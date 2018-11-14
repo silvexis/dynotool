@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) CloudZero, Inc. All rights reserved.
 # Licensed under the MIT License. See LICENSE file in the project root for full license information.
@@ -12,7 +12,8 @@ Usage:
     dynotool info <TABLE> [--profile <name>]
     dynotool head <TABLE> [--profile <name>]
     dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <name>]
-    dynotool export <TABLE> [--file <file> --type <type> --profile <name> --namespace <name> --segments <num>]
+    dynotool backup <TABLE> --file <file> [--profile <name>]
+    dynotool export <TABLE> [--file <file> --profile <name> --format <format> --namespace <name> --type <type> --segments <num>]
     dynotool import <TABLE> --file <file> [--profile <name>]
     dynotool wipe <TABLE> [--profile <name>]
     dynotool truncate <TABLE> [--filter <filter>] [--profile <name>]
@@ -24,6 +25,7 @@ Options:
     info                    Get info on the specified table.
     head                    Get the first 20 records from the table.
     copy                    Copy the data from SRC TABLE to DEST TABLE
+    backup                  Backup a table using native DynamoDB serialization
     export                  Export TABLE to file or S3 bucket
     import                  Import file or S3 bucket into TABLE
     wipe                    Wipe an existing table by recreating it (delete and create)
@@ -31,6 +33,7 @@ Options:
     --type <type>           Export type, either sequential or parallel [default: sequential].
     --file <file>           File or S3 bucket to import or export data to, defaults to table name.
     --profile <profile>     AWS Profile to use (optional) [default: default].
+    --format <format>       Format to export, options are DynamoDBJSON or JSON [default: JSON]
     --filter <filter>       A filter to apply to the operation. The syntax depends on the operation.
     --namespace <name>      Namespace to use when calling remote functions [default: dev].
     --segments <num>        Number of segments to break a parallel export into [default: 10].
@@ -38,9 +41,8 @@ Options:
 
 from __future__ import print_function, unicode_literals, absolute_import
 
-import json
+import simplejson as json
 import timeit
-from functools import partial
 from pprint import pprint
 import os
 from random import randrange
@@ -52,19 +54,12 @@ import sys
 from docopt import docopt
 
 from dynotool import __version__
+from dynotool.backup import perform_backup
+from dynotool.utils import deserialize_dynamo_data, get_table_info
 
 EXPORT_TYPE_SEQUENTIAL = "sequential"
 EXPORT_TYPE_PARALLEL = "parallel"
 EXPORT_TYPES = (EXPORT_TYPE_SEQUENTIAL, EXPORT_TYPE_PARALLEL)
-
-
-def get_table_info(client, table_name):
-    try:
-        result = client.describe_table(TableName=table_name)
-        table_info = result.get('Table')
-        return table_info
-    except ClientError:
-        return None
 
 
 def check_input_output_target(output_destination):
@@ -77,7 +72,7 @@ def check_input_output_target(output_destination):
         if not output_destination.endswith('.json'):
             output_destination += '.json'
 
-        return os.path.abspath(output_destination), "file"
+        return os.path.expanduser(output_destination), "file"
 
 
 def chunks(l, n):
@@ -96,7 +91,6 @@ def main():
 
     session = boto3.Session(profile_name=aws_profile)
     dynamodb = session.client('dynamodb')
-    dynamodb_resource = session.resource('dynamodb')
     lam = session.client('lambda')
     s3 = session.resource('s3')
 
@@ -131,7 +125,7 @@ def main():
         source_table = arguments['<SRC_TABLE>']
         dest_table = arguments['<DEST_TABLE>']
         table_list = dynamodb.list_tables()['TableNames']
-        if source_table in table_list:
+        if source_table in table_list and dest_table not in table_list:
             source_table_info = get_table_info(dynamodb, source_table)
 
             try:
@@ -154,22 +148,21 @@ def main():
                 dest_table_config['StreamSpecification'] = source_table_info['StreamSpecification']
 
             print('Extracted source table configuration:')
-            if dest_table not in table_list:
-                pprint(dest_table_config)
-                dest_table_info = dynamodb.create_table(**dest_table_config)['TableDescription']
-                print('Creating {}'.format(dest_table), end='')
-                wait_count = 0
-                while dest_table_info['TableStatus'] != 'ACTIVE':
-                    print('.', end='', flush=True)
-                    time.sleep(0.2)
-                    dest_table_info = get_table_info(dynamodb, dest_table)
-                    wait_count += 1
-                    if wait_count > 50:
-                        print('ERROR: Table creation taking too long, unsure why, exiting.')
-                        pprint(dest_table_info)
-                        sys.exit(1)
+            pprint(dest_table_config)
+            dest_table_info = dynamodb.create_table(**dest_table_config)['TableDescription']
+            print('Creating {}'.format(dest_table), end='')
+            wait_count = 0
+            while dest_table_info['TableStatus'] != 'ACTIVE':
+                print('.', end='', flush=True)
+                time.sleep(0.2)
+                dest_table_info = get_table_info(dynamodb, dest_table)
+                wait_count += 1
+                if wait_count > 50:
+                    print('ERROR: Table creation taking too long, unsure why, exiting.')
+                    pprint(dest_table_info)
+                    sys.exit(1)
 
-                print('success')
+            print('success')
 
             results = []
             scan_result = {'Count': -1, 'ScannedCount': 1}
@@ -189,7 +182,10 @@ def main():
                 print('.', end='', flush=True)
                 write_count += 1
             print('Done! {} records written'.format(write_count))
-
+        else:
+            print('Destination table {} already exists, unable to complete copy.'.format(dest_table))
+    elif arguments['backup']:
+        result = perform_backup(dynamodb, arguments)
     elif arguments['export']:
         if arguments['--type'] not in EXPORT_TYPES:
             print('Unsupported export type {}'.format(arguments['--type']))
@@ -218,10 +214,12 @@ def main():
             read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
             if export_type == 'file':
+                file_format = arguments['--format']
                 with open(export_dest, 'w', newline='\n') as outfile:
-                    print('Exporting {} to {}, read capacity is {}'.format(arguments['<TABLE>'],
-                                                                           arguments['--type'],
-                                                                           read_capacity))
+                    print('Exporting {} to {}, format is {}, read capacity is {}'.format(arguments['<TABLE>'],
+                                                                                         arguments['--type'],
+                                                                                         file_format,
+                                                                                         read_capacity))
                     kwargs = {}
                     done = False
                     request_count = 0
@@ -229,6 +227,9 @@ def main():
                     max_capacity = 0
                     retries = 0
                     start = timeit.default_timer()
+                    if file_format == "JSON":
+                        outfile.write('[\n')
+
                     while not done:
                         try:
                             request_count += 1
@@ -245,9 +246,18 @@ def main():
                                 done = True
 
                             for record in result['Items']:
-                                outfile.write("{}\n".format(json.dumps(record)))
+                                if file_format == 'JSON':
+                                    json_record = json.dumps(deserialize_dynamo_data(record))
+                                    if rows_received > 0:
+                                        outfile.write(",\n  {}".format(json_record))
+                                    else:
+                                        outfile.write("  {}".format(json_record))
+                                else:
+                                    outfile.write("  {}\n".format(json.dumps(record)))
                                 rows_received += 1
 
+                            # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
+                            # is being consumed.
                             if consumed_capacity / read_capacity >= 0.9:
                                 print("!", end='', flush=True)
                             elif consumed_capacity / read_capacity >= 0.65:
@@ -262,6 +272,9 @@ def main():
                             print('<' * retries)
                             time.sleep(2 ** retries)
                             retries += 1
+
+                    if file_format == "JSON":
+                        outfile.write('\n]')
 
                 stop = timeit.default_timer()
                 total_time = stop - start
@@ -471,6 +484,7 @@ def extract_table_definition(description):
         table_definition['StreamSpecification'] = description.get('StreamSpecification')
 
     return table_definition
+
 
 if __name__ == "__main__":
     status = main()
