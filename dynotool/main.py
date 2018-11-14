@@ -13,7 +13,7 @@ Usage:
     dynotool head <TABLE> [--profile <name>]
     dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <name>]
     dynotool backup <TABLE> --file <file> [--profile <name>]
-    dynotool export <TABLE> [--file <file> --profile <name> --format <format> --namespace <name> --type <type> --segments <num>]
+    dynotool export <TABLE> [--file <file> --profile <name> --namespace <name> --type <type> --segments <num>]
     dynotool import <TABLE> --file <file> [--profile <name>]
     dynotool wipe <TABLE> [--profile <name>]
     dynotool truncate <TABLE> [--filter <filter>] [--profile <name>]
@@ -26,14 +26,13 @@ Options:
     head                    Get the first 20 records from the table.
     copy                    Copy the data from SRC TABLE to DEST TABLE
     backup                  Backup a table using native DynamoDB serialization
-    export                  Export TABLE to file or S3 bucket
+    export                  Export TABLE to JSON
     import                  Import file or S3 bucket into TABLE
     wipe                    Wipe an existing table by recreating it (delete and create)
     truncate                Wipe an existing table by deleting all records
     --type <type>           Export type, either sequential or parallel [default: sequential].
     --file <file>           File or S3 bucket to import or export data to, defaults to table name.
     --profile <profile>     AWS Profile to use (optional) [default: default].
-    --format <format>       Format to export, options are DynamoDBJSON or JSON [default: JSON]
     --filter <filter>       A filter to apply to the operation. The syntax depends on the operation.
     --namespace <name>      Namespace to use when calling remote functions [default: dev].
     --segments <num>        Number of segments to break a parallel export into [default: 10].
@@ -214,12 +213,10 @@ def main():
             read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
             if export_type == 'file':
-                file_format = arguments['--format']
                 with open(export_dest, 'w', newline='\n') as outfile:
-                    print('Exporting {} to {}, format is {}, read capacity is {}'.format(arguments['<TABLE>'],
-                                                                                         arguments['--type'],
-                                                                                         file_format,
-                                                                                         read_capacity))
+                    print('Exporting {} to {}, format is JSON, read capacity is {}'.format(arguments['<TABLE>'],
+                                                                                           arguments['--type'],
+                                                                                           read_capacity))
                     kwargs = {}
                     done = False
                     request_count = 0
@@ -227,8 +224,7 @@ def main():
                     max_capacity = 0
                     retries = 0
                     start = timeit.default_timer()
-                    if file_format == "JSON":
-                        outfile.write('[\n')
+                    outfile.write('[\n')
 
                     while not done:
                         try:
@@ -246,14 +242,17 @@ def main():
                                 done = True
 
                             for record in result['Items']:
-                                if file_format == 'JSON':
+                                try:
                                     json_record = json.dumps(deserialize_dynamo_data(record))
-                                    if rows_received > 0:
-                                        outfile.write(",\n  {}".format(json_record))
-                                    else:
-                                        outfile.write("  {}".format(json_record))
+                                except TypeError:
+                                    print('ERROR: Data can not be serialized to JSON, try using backup instead')
+                                    sys.exit(1)
+                                    
+                                if rows_received > 0:
+                                    outfile.write(",\n  {}".format(json_record))
                                 else:
-                                    outfile.write("  {}\n".format(json.dumps(record)))
+                                    outfile.write("  {}".format(json_record))
+
                                 rows_received += 1
 
                             # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
@@ -273,8 +272,7 @@ def main():
                             time.sleep(2 ** retries)
                             retries += 1
 
-                    if file_format == "JSON":
-                        outfile.write('\n]')
+                    outfile.write('\n]')
 
                 stop = timeit.default_timer()
                 total_time = stop - start

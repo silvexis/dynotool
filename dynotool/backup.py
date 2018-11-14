@@ -15,10 +15,10 @@ def perform_backup(dynamodb, arguments):
     table_info = get_table_info(dynamodb, arguments['<TABLE>'])
     read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
-    outfile = os.path.expanduser(arguments['--file'])
-    with open(outfile, 'w', newline='\n') as outfile:
+    dest_file_name = os.path.expanduser(arguments['--file'])
+    with open(dest_file_name, 'w', newline='\n') as outfile:
         print('Backing up table {} to {}, format is native, read capacity is {}'.format(arguments['<TABLE>'],
-                                                                                        outfile,
+                                                                                        dest_file_name,
                                                                                         read_capacity))
         kwargs = {}
         done = False
