@@ -26,9 +26,8 @@ setup(
     include_package_data=True,
     install_requires=[
         'docopt>=0.6.2',
-        'boto3>=1.5.6',
-        'botocore>=1.8.20',
-        'simplejson>=3.13.2'
+        'boto3>=1.9.82',
+        'simplejson>=3.16.0'
     ],
     license="MIT",
     zip_safe=False,
