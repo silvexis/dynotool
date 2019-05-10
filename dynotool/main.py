@@ -12,7 +12,6 @@ Usage:
     dynotool info <TABLE> [--profile <name>]
     dynotool head <TABLE> [--profile <name>]
     dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <name>]
-    dynotool backup <TABLE> --file <file> [--profile <name>]
     dynotool export <TABLE> [--file <file> --profile <name> --namespace <name> --type <type> --segments <num>]
     dynotool import <TABLE> --file <file> [--profile <name>]
     dynotool wipe <TABLE> [--profile <name>]
@@ -25,7 +24,6 @@ Options:
     info                    Get info on the specified table.
     head                    Get the first 20 records from the table.
     copy                    Copy the data from SRC TABLE to DEST TABLE
-    backup                  Backup a table using native DynamoDB serialization
     export                  Export TABLE to JSON
     import                  Import file or S3 bucket into TABLE
     wipe                    Wipe an existing table by recreating it (delete and create)
@@ -53,7 +51,6 @@ import sys
 from docopt import docopt
 
 from dynotool import __version__
-from dynotool.backup import perform_backup
 from dynotool.utils import deserialize_dynamo_data, get_table_info
 
 EXPORT_TYPE_SEQUENTIAL = "sequential"
@@ -183,8 +180,6 @@ def main():
             print('Done! {} records written'.format(write_count))
         else:
             print('Destination table {} already exists, unable to complete copy.'.format(dest_table))
-    elif arguments['backup']:
-        scan_count = perform_backup(dynamodb, arguments)
     elif arguments['export']:
         if arguments['--type'] not in EXPORT_TYPES:
             print('Unsupported export type {}'.format(arguments['--type']))
