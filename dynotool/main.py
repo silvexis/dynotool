@@ -240,7 +240,7 @@ def main():
                                 try:
                                     json_record = json.dumps(deserialize_dynamo_data(record))
                                 except TypeError:
-                                    print('ERROR: Data can not be serialized to JSON, try using backup instead')
+                                    print('ERROR: Data can not be serialized to JSON.')
                                     sys.exit(1)
 
                                 if rows_received > 0:
