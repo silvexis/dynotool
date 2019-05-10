@@ -115,9 +115,9 @@ def main():
     elif arguments['head']:
         table_info = get_table_info(dynamodb, arguments['<TABLE>'])
         if table_info:
-            result = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=20)
-            if result['Count'] > 0:
-                for record in result['Items']:
+            scan_count = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=20)
+            if scan_count['Count'] > 0:
+                for record in scan_count['Items']:
                     print(record)
 
     elif arguments['copy']:
@@ -184,7 +184,7 @@ def main():
         else:
             print('Destination table {} already exists, unable to complete copy.'.format(dest_table))
     elif arguments['backup']:
-        result = perform_backup(dynamodb, arguments)
+        scan_count = perform_backup(dynamodb, arguments)
     elif arguments['export']:
         if arguments['--type'] not in EXPORT_TYPES:
             print('Unsupported export type {}'.format(arguments['--type']))
@@ -230,24 +230,24 @@ def main():
                         try:
                             request_count += 1
 
-                            result = dynamodb.scan(TableName=arguments['<TABLE>'],
+                            scan_count = dynamodb.scan(TableName=arguments['<TABLE>'],
                                                    ReturnConsumedCapacity="TOTAL",
                                                    Select="ALL_ATTRIBUTES", **kwargs)
-                            consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
+                            consumed_capacity = scan_count['ConsumedCapacity']['CapacityUnits']
                             max_capacity = max(max_capacity, consumed_capacity)
 
-                            if result.get('LastEvaluatedKey'):
-                                kwargs['ExclusiveStartKey'] = result.get('LastEvaluatedKey')
+                            if scan_count.get('LastEvaluatedKey'):
+                                kwargs['ExclusiveStartKey'] = scan_count.get('LastEvaluatedKey')
                             else:
                                 done = True
 
-                            for record in result['Items']:
+                            for record in scan_count['Items']:
                                 try:
                                     json_record = json.dumps(deserialize_dynamo_data(record))
                                 except TypeError:
                                     print('ERROR: Data can not be serialized to JSON, try using backup instead')
                                     sys.exit(1)
-                                    
+
                                 if rows_received > 0:
                                     outfile.write(",\n  {}".format(json_record))
                                 else:
@@ -404,20 +404,20 @@ def main():
     elif arguments['truncate']:
         table_name = arguments['<TABLE>']
         print('Wiping table {} (by truncating)'.format(table_name))
-        result = delete_all_items(session, table_name, arguments['--filter'])
-        print(result)
+        scan_count, delete_count = delete_items_with_filter(session, table_name, arguments['--filter'])
+        print('Scanned the table ' + str(scan_count) + ' times and deleted ' + str(delete_count) + ' item(s) overall.')
 
     return 0
 
 
-def delete_all_items(session, table_name, filter=None):
+def delete_items_with_filter(session, table_name, filter=None):
     client = session.client('dynamodb')
     resource = session.resource('dynamodb')
     table = resource.Table(table_name)
-    # Deletes all items from a DynamoDB table.
+    # Deletes items from a DynamoDB table.
     # You need to confirm your intention by pressing Enter.
     response = client.describe_table(TableName=table_name)
-    aprox_item_count = response['Table']['ItemCount']
+    approx_item_count = response['Table']['ItemCount']
     keys = [k['AttributeName'] for k in response['Table']['KeySchema']]
     scan_args = {}
 
@@ -427,29 +427,29 @@ def delete_all_items(session, table_name, filter=None):
 
     items = response['Items']
     number_of_items = len(items)
-    if number_of_items == 0:  # no items to delete
-        print("Table '{}' is empty.".format(table_name))
-        return
 
-    print("You are about to delete {} items (out of {}) from table '{}'.".format(number_of_items,
-                                                                                 aprox_item_count,
-                                                                                 table_name))
-    print("Sample Event:")
-    pprint(items[randrange(0, number_of_items)])
+    print("Initial scan shows you are about to delete {} items (out of {}) from table '{}'.".format(number_of_items,
+                                                                                                    approx_item_count,
+                                                                                                    table_name))
+    print("NOTE: this is an initial scan, meaning that we only looked at a small number of rows. If there were no "
+          "records found in the initial scan, then it doesn't mean we won't find some as we continue scanning.")
+
+    if number_of_items > 0:
+        print("Sample Event:")
+        pprint(items[randrange(0, number_of_items)])
     input("Press Enter to continue...")
 
-    count = 0
+    scan_count = 1  # Starts at one to account for initial scan above
+    delete_count = 0
     item = None
-    while response.get('LastEvaluatedKey') or count == 0:
-        count += 1
+    while response.get('LastEvaluatedKey') or scan_count == 0:
         try:
             with table.batch_writer() as batch:
                 for item in items:
                     key_dict = {k: item[k] for k in keys}
-                    # print("Deleting {}".format(key_dict))
                     print('.', end='', flush=True)
                     batch.delete_item(Key=key_dict)
-                    count += 1
+                    delete_count += 1
         except Exception as error:
             print(error)
             print(item)
@@ -458,10 +458,11 @@ def delete_all_items(session, table_name, filter=None):
         response = table.scan(**scan_args)
         items = response['Items']
         number_of_items = len(items)
+        scan_count += 1
         print("-" * 120)
-        print('Found {} more to delete'.format(number_of_items))
+        print('Scan {}, found {} more to delete'.format(scan_count, number_of_items))
 
-    return count
+    return scan_count, delete_count
 
 
 def extract_table_definition(description):
