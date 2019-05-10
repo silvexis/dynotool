@@ -1,7 +1,6 @@
 {
   "dependencies": {
-    "serverless": "^1.19.0",
-    "serverless-cf-vars": "^0.1.0",
-    "serverless-prune-plugin": "^1.1.1"
+    "serverless": "^1.36.1",
+    "serverless-cf-vars": "^0.3.0"
   }
 }
