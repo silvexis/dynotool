@@ -11,9 +11,9 @@ PROJECT_URL = "http://www.cloudzero.com"
 doclink = "Please visit {}.".format(PROJECT_URL)
 
 setup(
-    name='cloudzero-dyn-o-tool',
+    name='dyn-o-tool',
     version=__version__,
-    description='Tools for easier living with DynamoDB',
+    description='Tools for better living with DynamoDB',
     long_description=doclink,
     author='CloudZero',
     author_email='support@cloudzero.com',
@@ -37,10 +37,8 @@ setup(
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
         'Natural Language :: English',
-        'Programming Language :: Python :: 2',
-        'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
         'License :: OSI Approved :: MIT License',
         'Operating System :: MacOS',
         'Operating System :: Unix'
