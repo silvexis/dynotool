@@ -12,7 +12,7 @@ Usage:
     dynotool info <TABLE> [--profile <name>]
     dynotool head <TABLE> [--profile <name>]
     dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <name>]
-    dynotool export <TABLE> --format <format> [--file <file> --profile <name> --namespace <name> --type <type> --segments <num>]
+    dynotool export <TABLE> [--format <format> --file <file> --profile <name> --namespace <name> --type <type> --segments <num>]
     dynotool import <TABLE> --file <file> [--profile <name>]
     dynotool wipe <TABLE> [--profile <name>]
     dynotool truncate <TABLE> [--filter <filter>] [--profile <name>]
@@ -212,7 +212,7 @@ def main():
                 with open(export_dest, 'w', newline='\n') as outfile:
                     print('Exporting {} to {}, format is JSON, read capacity is {}'.format(arguments['<TABLE>'],
                                                                                            arguments['--type'],
-                                                                                           read_capacity))
+                                                                                           read_capacity or "infinite"))
                     kwargs = {}
                     done = False
                     request_count = 0
@@ -253,7 +253,9 @@ def main():
 
                             # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
                             # is being consumed.
-                            if consumed_capacity / read_capacity >= 0.9:
+                            if read_capacity == 0:
+                                print("_", end='', flush=True)
+                            elif consumed_capacity / read_capacity >= 0.9:
                                 print("!", end='', flush=True)
                             elif consumed_capacity / read_capacity >= 0.65:
                                 print("*", end='', flush=True)
