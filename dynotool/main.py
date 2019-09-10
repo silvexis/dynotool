@@ -12,7 +12,7 @@ Usage:
     dynotool info <TABLE> [--profile <name>]
     dynotool head <TABLE> [--profile <name>]
     dynotool copy <SRC_TABLE> <DEST_TABLE> [--profile <name>]
-    dynotool export <TABLE> [--format <format> --file <file> --profile <name> --namespace <name> --type <type> --segments <num>]
+    dynotool export <TABLE> [--format <format> --file <file> --profile <name>]
     dynotool import <TABLE> --file <file> [--profile <name>]
     dynotool wipe <TABLE> [--profile <name>]
     dynotool truncate <TABLE> [--filter <filter>] [--profile <name>]
@@ -29,12 +29,9 @@ Options:
     wipe                    Wipe an existing table by recreating it (delete and create)
     truncate                Wipe an existing table by deleting all records
     --format <format>       JSON or CSV [default: json]
-    --type <type>           Export type, either sequential or parallel [default: sequential].
     --file <file>           File or S3 bucket to import or export data to, defaults to table name.
     --profile <profile>     AWS Profile to use (optional) [default: default].
     --filter <filter>       A filter to apply to the operation. The syntax depends on the operation.
-    --namespace <name>      Namespace to use when calling remote functions [default: dev].
-    --segments <num>        Number of segments to break a parallel export into [default: 10].
 """
 
 from __future__ import print_function, unicode_literals, absolute_import
@@ -54,30 +51,25 @@ import sys
 from docopt import docopt
 
 from dynotool import __version__
-from dynotool.utils import deserialize_dynamo_data, get_table_info
+from dynotool.utils import deserialize_dynamo_data, get_table_info, chunks
 
 EXPORT_TYPE_SEQUENTIAL = "sequential"
 EXPORT_TYPE_PARALLEL = "parallel"
 EXPORT_TYPES = (EXPORT_TYPE_SEQUENTIAL, EXPORT_TYPE_PARALLEL)
 
 
-def check_input_output_target(output_destination):
+def check_input_output_target(output_destination, file_format):
     if not output_destination:
         return None, None
 
     if output_destination.lower().startswith('s3://'):
         return output_destination[5:], "S3"
     else:
-        if not output_destination.endswith('.json'):
-            output_destination += '.json'
+
+        if not output_destination.endswith(f'.{file_format}'):
+            output_destination += f'.{file_format}'
 
         return os.path.expanduser(output_destination), "file"
-
-
-def chunks(l, n):
-    """Yield successive n-sized chunks from l."""
-    for i in range(0, len(l), n):
-        yield l[i:i + n]
 
 
 def export_write_header(outfile, export_format):
@@ -118,11 +110,9 @@ def main():
     print('-' * 120)
 
     aws_profile = arguments['--profile']
-    namespace = arguments['--namespace']
 
     session = boto3.Session(profile_name=aws_profile)
     dynamodb = session.client('dynamodb')
-    lam = session.client('lambda')
     s3 = session.resource('s3')
 
     if arguments['list']:
@@ -216,114 +206,87 @@ def main():
         else:
             print('Destination table {} already exists, unable to complete copy.'.format(dest_table))
     elif arguments['export']:
-        if arguments['--type'] not in EXPORT_TYPES:
-            print('Unsupported export type {}'.format(arguments['--type']))
-            sys.exit(1)
+        export_dest, export_type = check_input_output_target(arguments['--file'] or arguments['<TABLE>'],
+                                                             arguments['--format'])
+        table_info = get_table_info(dynamodb, arguments['<TABLE>'])
+        read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
-        export_dest, export_type = check_input_output_target(arguments['--file'] or arguments['<TABLE>'])
+        file_format = arguments.get('--format')
 
-        if arguments['--type'] == EXPORT_TYPE_PARALLEL:
-            payload = {
-                "s3_bucket": export_dest,
-                "src_table": arguments['<TABLE>'],
-                "total_segments": arguments['--segments']
-            }
-            response = lam.invoke(FunctionName='dyn-o-tool-{}-dump-table-launcher'.format(namespace),
-                                  InvocationType='Event',
-                                  Payload=json.dumps(payload))
-            if response['StatusCode'] == 202:
-                print('Parallel table dump started for {} to s3://{}'.format(arguments['<TABLE>'],
-                                                                             export_dest))
-            else:
-                print("Something went wrong, I'm not sure what sorry!")
-                pprint(response)
+        if export_type == 'file':
+            with open(export_dest, 'w', newline='\n') as outfile:
+                print('Exporting {} to {}, read capacity is {}'.format(arguments['<TABLE>'],
+                                                                       file_format,
+                                                                       read_capacity or "infinite"))
+                kwargs = {}
+                done = False
+                request_count = 0
+                rows_received = 0
+                max_capacity = 0
+                retries = 0
+                start = timeit.default_timer()
 
-        elif arguments['--type'] == EXPORT_TYPE_SEQUENTIAL:
-            table_info = get_table_info(dynamodb, arguments['<TABLE>'])
-            read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
+                if file_format == "json":
+                    writer = outfile
+                elif file_format == "csv":
+                    result = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=1)
+                    fieldnames = result['Items'][0].keys()
+                    writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+                else:
+                    print(f"ERROR: Unknown export format {file_format}")
+                    sys.exit(1)
 
-            file_format = arguments.get('--format')
+                export_write_header(writer, export_format=file_format)
 
-            if export_type == 'file':
-                with open(export_dest, 'w', newline='\n') as outfile:
-                    print('Exporting {} to {}, format is {}, read capacity is {}'.format(arguments['<TABLE>'],
-                                                                                         arguments['--type'],
-                                                                                         file_format,
-                                                                                         read_capacity or "infinite"))
-                    kwargs = {}
-                    done = False
-                    request_count = 0
-                    rows_received = 0
-                    max_capacity = 0
-                    retries = 0
-                    start = timeit.default_timer()
+                while not done:
+                    try:
+                        request_count += 1
 
-                    if file_format == "json":
-                        writer = outfile
-                    elif file_format == "csv":
-                        result = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=1)
-                        fieldnames = result['Items'][0].keys()
-                        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-                    else:
-                        print(f"ERROR: Unknown export format {file_format}")
-                        sys.exit(1)
+                        result = dynamodb.scan(TableName=arguments['<TABLE>'],
+                                               ReturnConsumedCapacity="TOTAL",
+                                               Select="ALL_ATTRIBUTES", **kwargs)
+                        consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
+                        max_capacity = max(max_capacity, consumed_capacity)
 
-                    export_write_header(writer, export_format=file_format)
+                        if result.get('LastEvaluatedKey'):
+                            kwargs['ExclusiveStartKey'] = result.get('LastEvaluatedKey')
+                        else:
+                            done = True
 
-                    while not done:
-                        try:
-                            request_count += 1
+                        for record in result['Items']:
+                            export_write_row(record, rows_received, writer, export_format=file_format)
+                            rows_received += 1
 
-                            result = dynamodb.scan(TableName=arguments['<TABLE>'],
-                                                   ReturnConsumedCapacity="TOTAL",
-                                                   Select="ALL_ATTRIBUTES", **kwargs)
-                            consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
-                            max_capacity = max(max_capacity, consumed_capacity)
+                        # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
+                        # is being consumed.
+                        if read_capacity == 0:  # Infinite capacity
+                            print("_", end='', flush=True)
+                        elif consumed_capacity / read_capacity >= 0.9:
+                            print("!", end='', flush=True)
+                        elif consumed_capacity / read_capacity >= 0.65:
+                            print("*", end='', flush=True)
+                        else:
+                            print(".", end='', flush=True)
 
-                            if result.get('LastEvaluatedKey'):
-                                kwargs['ExclusiveStartKey'] = result.get('LastEvaluatedKey')
-                            else:
-                                done = True
+                    except ClientError as err:
+                        if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
+                                                                 'ThrottlingException'):
+                            raise
+                        print('<' * retries)
+                        time.sleep(2 ** retries)
+                        retries += 1
 
-                            for record in result['Items']:
-                                export_write_row(record, rows_received, writer, export_format=file_format)
-                                rows_received += 1
+                export_write_footer(outfile, export_format=file_format)
 
-                            # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
-                            # is being consumed.
-                            if read_capacity == 0:  # Infinite capacity
-                                print("_", end='', flush=True)
-                            elif consumed_capacity / read_capacity >= 0.9:
-                                print("!", end='', flush=True)
-                            elif consumed_capacity / read_capacity >= 0.65:
-                                print("*", end='', flush=True)
-                            else:
-                                print(".", end='', flush=True)
-
-                        except ClientError as err:
-                            if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
-                                                                     'ThrottlingException'):
-                                raise
-                            print('<' * retries)
-                            time.sleep(2 ** retries)
-                            retries += 1
-
-                    export_write_footer(outfile, export_format=file_format)
-
-                stop = timeit.default_timer()
-                total_time = stop - start
-                avg_row_processing_time = rows_received / total_time
-                print('\nExport complete: {} rows exported in {:.2f} seconds (~{:.2f} rps) '
-                      'in {} request(s), max consumed capacity: {}'.format(rows_received,
-                                                                           total_time,
-                                                                           avg_row_processing_time,
-                                                                           request_count,
-                                                                           max_capacity))
-            else:
-                print('Other output types for sequential exporter are not supported at this time')
+            stop = timeit.default_timer()
+            total_time = stop - start
+            avg_row_processing_time = rows_received / total_time
+            print(f'\nExport complete, output file: {export_dest}\n'
+                  f'{rows_received} rows exported in {total_time:.2f} seconds (~{avg_row_processing_time:.2f} rps) '
+                  f'in {request_count} request(s), max consumed capacity: {max_capacity}')
 
     elif arguments['import']:
-        input_source, import_type = check_input_output_target(arguments['--file'])
+        input_source, import_type = check_input_output_target(arguments['--file'], arguments['--format'])
         write_capacity = 0
         target_table_name = arguments['<TABLE>']
         print('Importing {} to table {} ({} write capacity)'.format(input_source,

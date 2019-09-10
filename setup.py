@@ -4,21 +4,22 @@
 # Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 from dynotool import __version__
-from setuptools import setup, find_packages
+import setuptools
 
 
-PROJECT_URL = "http://www.cloudzero.com"
-doclink = "Please visit {}.".format(PROJECT_URL)
+PROJECT_URL = "https://github.com/Cloudzero/dynotool"
+with open("README.md", "r") as fh:
+    long_description = fh.read()
 
-setup(
+setuptools.setup(
     name='dyn-o-tool',
     version=__version__,
     description='Tools for better living with DynamoDB',
-    long_description=doclink,
+    long_description=long_description,
     author='CloudZero',
     author_email='support@cloudzero.com',
     url=PROJECT_URL,
-    packages=find_packages(),
+    packages=setuptools.find_packages(),
     entry_points={
         'console_scripts': ['dynotool=dynotool.main:main']
     },
@@ -43,4 +44,5 @@ setup(
         'Operating System :: MacOS',
         'Operating System :: Unix'
     ],
+    python_requires='>=3.6'
 )
