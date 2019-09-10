@@ -28,7 +28,7 @@ Options:
     import                  Import file or S3 bucket into TABLE
     wipe                    Wipe an existing table by recreating it (delete and create)
     truncate                Wipe an existing table by deleting all records
-    --format<format>        JSON or CSV [default: json]
+    --format <format>       JSON or CSV [default: json]
     --type <type>           Export type, either sequential or parallel [default: sequential].
     --file <file>           File or S3 bucket to import or export data to, defaults to table name.
     --profile <profile>     AWS Profile to use (optional) [default: default].
@@ -38,6 +38,8 @@ Options:
 """
 
 from __future__ import print_function, unicode_literals, absolute_import
+
+import csv
 
 import simplejson as json
 import timeit
@@ -76,6 +78,38 @@ def chunks(l, n):
     """Yield successive n-sized chunks from l."""
     for i in range(0, len(l), n):
         yield l[i:i + n]
+
+
+def export_write_header(outfile, export_format):
+    if export_format == "json":
+        outfile.write('[\n')
+    elif export_format == "csv":
+        outfile.writeheader()
+
+
+def export_write_footer(outfile, export_format):
+    if export_format == "json":
+        outfile.write('\n]')
+    elif export_format == "csv":
+        pass
+
+
+def export_write_row(record, row_number, writer, export_format):
+    record = deserialize_dynamo_data(record)
+    if export_format == "json":
+        try:
+            json_record = json.dumps(record)
+        except TypeError:
+            print(r"ERROR: Data can not be serialized to JSON ¯\_(ツ)_/¯")
+            print(record)
+            sys.exit(1)
+
+        if row_number > 0:
+            writer.write(",\n  {}".format(json_record))
+        else:
+            writer.write("  {}".format(json_record))
+    elif export_format == "csv":
+        writer.writerow(record)
 
 
 def main():
@@ -208,11 +242,14 @@ def main():
             table_info = get_table_info(dynamodb, arguments['<TABLE>'])
             read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
 
+            file_format = arguments.get('--format')
+
             if export_type == 'file':
                 with open(export_dest, 'w', newline='\n') as outfile:
-                    print('Exporting {} to {}, format is JSON, read capacity is {}'.format(arguments['<TABLE>'],
-                                                                                           arguments['--type'],
-                                                                                           read_capacity or "infinite"))
+                    print('Exporting {} to {}, format is {}, read capacity is {}'.format(arguments['<TABLE>'],
+                                                                                         arguments['--type'],
+                                                                                         file_format,
+                                                                                         read_capacity or "infinite"))
                     kwargs = {}
                     done = False
                     request_count = 0
@@ -220,7 +257,18 @@ def main():
                     max_capacity = 0
                     retries = 0
                     start = timeit.default_timer()
-                    outfile.write('[\n')
+
+                    if file_format == "json":
+                        writer = outfile
+                    elif file_format == "csv":
+                        result = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=1)
+                        fieldnames = result['Items'][0].keys()
+                        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+                    else:
+                        print(f"ERROR: Unknown export format {file_format}")
+                        sys.exit(1)
+
+                    export_write_header(writer, export_format=file_format)
 
                     while not done:
                         try:
@@ -238,22 +286,12 @@ def main():
                                 done = True
 
                             for record in result['Items']:
-                                try:
-                                    json_record = json.dumps(deserialize_dynamo_data(record))
-                                except TypeError:
-                                    print('ERROR: Data can not be serialized to JSON, try using backup instead')
-                                    sys.exit(1)
-                                    
-                                if rows_received > 0:
-                                    outfile.write(",\n  {}".format(json_record))
-                                else:
-                                    outfile.write("  {}".format(json_record))
-
+                                export_write_row(record, rows_received, writer, export_format=file_format)
                                 rows_received += 1
 
                             # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
                             # is being consumed.
-                            if read_capacity == 0:
+                            if read_capacity == 0:  # Infinite capacity
                                 print("_", end='', flush=True)
                             elif consumed_capacity / read_capacity >= 0.9:
                                 print("!", end='', flush=True)
@@ -270,7 +308,7 @@ def main():
                             time.sleep(2 ** retries)
                             retries += 1
 
-                    outfile.write('\n]')
+                    export_write_footer(outfile, export_format=file_format)
 
                 stop = timeit.default_timer()
                 total_time = stop - start
