@@ -27,7 +27,7 @@ setuptools.setup(
     include_package_data=True,
     install_requires=[
         'docopt>=0.6.2',
-        'boto3>=1.9.82',
+        'boto3>=1.10.46',
         'simplejson>=3.16.0'
     ],
     license="MIT",

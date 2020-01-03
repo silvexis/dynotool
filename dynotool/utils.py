@@ -6,6 +6,20 @@ from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 
 
+def serialize_to_json(obj):
+    """
+    Transform objects to types that can be serialized to JSON
+    Args:
+        obj:
+
+    Returns:
+
+    """
+    if isinstance(obj, set):
+        return list(obj)
+    raise TypeError
+
+
 def deserialize_dynamo_data(input_data):
     """
     Given a dict containing the "serialized" data format used by the low-level

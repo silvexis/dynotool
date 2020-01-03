@@ -25,11 +25,11 @@ Options:
     head                    Get the first 20 records from the table.
     copy                    Copy the data from SRC TABLE to DEST TABLE
     export                  Export TABLE to JSON
-    import                  Import file or S3 bucket into TABLE
+    import                  Import file into TABLE
     wipe                    Wipe an existing table by recreating it (delete and create)
     truncate                Wipe an existing table by deleting all records
     --format <format>       JSON or CSV [default: json]
-    --file <file>           File or S3 bucket to import or export data to, defaults to table name.
+    --file <file>           File to import or export data to, defaults to table name.
     --profile <profile>     AWS Profile to use (optional) [default: default].
     --filter <filter>       A filter to apply to the operation. The syntax depends on the operation.
 """
@@ -37,21 +37,20 @@ Options:
 from __future__ import print_function, unicode_literals, absolute_import
 
 import csv
-
-import simplejson as json
+import os
+import sys
+import time
 import timeit
 from pprint import pprint
-import os
 from random import randrange
 
 import boto3
-import time
+import simplejson as json
 from botocore.exceptions import ClientError
-import sys
 from docopt import docopt
 
 from dynotool import __version__
-from dynotool.utils import deserialize_dynamo_data, get_table_info, chunks
+from dynotool.utils import deserialize_dynamo_data, get_table_info, serialize_to_json
 
 EXPORT_TYPE_SEQUENTIAL = "sequential"
 EXPORT_TYPE_PARALLEL = "parallel"
@@ -65,7 +64,6 @@ def check_input_output_target(output_destination, file_format):
     if output_destination.lower().startswith('s3://'):
         return output_destination[5:], "S3"
     else:
-
         if not output_destination.endswith(f'.{file_format}'):
             output_destination += f'.{file_format}'
 
@@ -90,10 +88,10 @@ def export_write_row(record, row_number, writer, export_format):
     record = deserialize_dynamo_data(record)
     if export_format == "json":
         try:
-            json_record = json.dumps(record)
-        except TypeError:
-            print(r"ERROR: Data can not be serialized to JSON ¯\_(ツ)_/¯")
-            print(record)
+            json_record = json.dumps(record, default=serialize_to_json)
+        except TypeError as error:
+            print(fr"ERROR: Data can not be serialized to JSON ¯\_(ツ)_/¯ ({error})")
+            pprint(record)
             sys.exit(1)
 
         if row_number > 0:
@@ -101,7 +99,12 @@ def export_write_row(record, row_number, writer, export_format):
         else:
             writer.write("  {}".format(json_record))
     elif export_format == "csv":
-        writer.writerow(record)
+        try:
+            writer.writerow(record)
+        except ValueError:
+            # Typically this happens when we come across a record that doesn't fit the schema
+            # ValueError: dict contains fields not in fieldnames: ....
+            print("-", end='', flush=True)
 
 
 def main():
@@ -112,32 +115,32 @@ def main():
     aws_profile = arguments['--profile']
 
     session = boto3.Session(profile_name=aws_profile)
-    dynamodb = session.client('dynamodb')
-    s3 = session.resource('s3')
+    ddb_client = session.client('dynamodb')
+    ddb_resource = session.resource('dynamodb')
 
     if arguments['list']:
         done = False
         while not done:
-            response = dynamodb.list_tables()
+            response = ddb_client.list_tables()
             table_list = response['TableNames']
             for table_name in table_list:
-                table_info = get_table_info(dynamodb, table_name)
-                print("{:<40} {} ~{:>10} records ({:,.2f} mb)".format(table_name, table_info['TableStatus'],
+                table_info = get_table_info(ddb_client, table_name)
+                print("{:<70} {} ~{:>10} records ({:,.2f} mb)".format(table_name, table_info['TableStatus'],
                                                                       table_info['ItemCount'],
                                                                       table_info['TableSizeBytes'] / (1024 * 1024)))
             if len(table_list) <= 100:
                 done = True
 
     elif arguments['info']:
-        table_info = get_table_info(dynamodb, arguments['<TABLE>'])
+        table_info = get_table_info(ddb_client, arguments['<TABLE>'])
         if table_info:
             print('Table {} is {}'.format(arguments['<TABLE>'], table_info['TableStatus']))
             print('   Contains roughly {:,} items and {:,.2f} MB'.format(table_info['ItemCount'],
                                                                          table_info['TableSizeBytes'] / (1024 * 1024)))
     elif arguments['head']:
-        table_info = get_table_info(dynamodb, arguments['<TABLE>'])
+        table_info = get_table_info(ddb_client, arguments['<TABLE>'])
         if table_info:
-            result = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=20)
+            result = ddb_client.scan(TableName=arguments['<TABLE>'], Limit=20)
             if result['Count'] > 0:
                 for record in result['Items']:
                     print(record)
@@ -145,9 +148,9 @@ def main():
     elif arguments['copy']:
         source_table = arguments['<SRC_TABLE>']
         dest_table = arguments['<DEST_TABLE>']
-        table_list = dynamodb.list_tables()['TableNames']
+        table_list = ddb_client.list_tables()['TableNames']
         if source_table in table_list and dest_table not in table_list:
-            source_table_info = get_table_info(dynamodb, source_table)
+            source_table_info = get_table_info(ddb_client, source_table)
 
             try:
                 del source_table_info['ProvisionedThroughput']['NumberOfDecreasesToday']
@@ -170,13 +173,13 @@ def main():
 
             print('Extracted source table configuration:')
             pprint(dest_table_config)
-            dest_table_info = dynamodb.create_table(**dest_table_config)['TableDescription']
+            dest_table_info = ddb_client.create_table(**dest_table_config)['TableDescription']
             print('Creating {}'.format(dest_table), end='')
             wait_count = 0
             while dest_table_info['TableStatus'] != 'ACTIVE':
                 print('.', end='', flush=True)
                 time.sleep(0.2)
-                dest_table_info = get_table_info(dynamodb, dest_table)
+                dest_table_info = get_table_info(ddb_client, dest_table)
                 wait_count += 1
                 if wait_count > 50:
                     print('ERROR: Table creation taking too long, unsure why, exiting.')
@@ -189,7 +192,7 @@ def main():
             scan_result = {'Count': -1, 'ScannedCount': 1}
             print('Reading data from {}'.format(source_table), end='')
             while scan_result['Count'] != scan_result['ScannedCount']:
-                scan_result = dynamodb.scan(TableName=source_table, Select='ALL_ATTRIBUTES')
+                scan_result = ddb_client.scan(TableName=source_table, Select='ALL_ATTRIBUTES')
                 results += scan_result['Items']
                 print('.', end='', flush=True)
 
@@ -199,7 +202,7 @@ def main():
             print("Loading records into {}".format(dest_table), end='')
             write_count = 0
             for item in results:
-                dynamodb.put_item(TableName=dest_table, Item=item)
+                ddb_client.put_item(TableName=dest_table, Item=item)
                 print('.', end='', flush=True)
                 write_count += 1
             print('Done! {} records written'.format(write_count))
@@ -208,8 +211,12 @@ def main():
     elif arguments['export']:
         export_dest, export_type = check_input_output_target(arguments['--file'] or arguments['<TABLE>'],
                                                              arguments['--format'])
-        table_info = get_table_info(dynamodb, arguments['<TABLE>'])
-        read_capacity = table_info['ProvisionedThroughput']['ReadCapacityUnits']
+        table_info = get_table_info(ddb_client, arguments['<TABLE>'])
+        if table_info is None:
+            print(f"Could not find or load {arguments['<TABLE>']}, check your AWS permissions")
+            sys.exit()
+        provisioned_throughput = table_info.get('ProvisionedThroughput') or {}
+        read_capacity = provisioned_throughput.get('ReadCapacityUnits')
 
         file_format = arguments.get('--format')
 
@@ -221,7 +228,7 @@ def main():
                 kwargs = {}
                 done = False
                 request_count = 0
-                rows_received = 0
+                rows_imported = 0
                 max_capacity = 0
                 retries = 0
                 start = timeit.default_timer()
@@ -229,7 +236,7 @@ def main():
                 if file_format == "json":
                     writer = outfile
                 elif file_format == "csv":
-                    result = dynamodb.scan(TableName=arguments['<TABLE>'], Limit=1)
+                    result = ddb_client.scan(TableName=arguments['<TABLE>'], Limit=1)
                     fieldnames = result['Items'][0].keys()
                     writer = csv.DictWriter(outfile, fieldnames=fieldnames)
                 else:
@@ -242,9 +249,13 @@ def main():
                     try:
                         request_count += 1
 
-                        result = dynamodb.scan(TableName=arguments['<TABLE>'],
-                                               ReturnConsumedCapacity="TOTAL",
-                                               Select="ALL_ATTRIBUTES", **kwargs)
+                        result = ddb_client.scan(TableName=arguments['<TABLE>'],
+                                                 ReturnConsumedCapacity="TOTAL",
+                                                 Select="ALL_ATTRIBUTES", **kwargs)
+
+                        # FilterExpression="metric_type = :metric_type",
+                        # ExpressionAttributeValues={":metric_type": {"S": "AWS/RDS"}}
+
                         consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
                         max_capacity = max(max_capacity, consumed_capacity)
 
@@ -254,8 +265,8 @@ def main():
                             done = True
 
                         for record in result['Items']:
-                            export_write_row(record, rows_received, writer, export_format=file_format)
-                            rows_received += 1
+                            export_write_row(record, rows_imported, writer, export_format=file_format)
+                            rows_imported += 1
 
                         # print some cute status indicators. Use '.', '*' or '!' depending on how much capacity
                         # is being consumed.
@@ -280,125 +291,55 @@ def main():
 
             stop = timeit.default_timer()
             total_time = stop - start
-            avg_row_processing_time = rows_received / total_time
+            avg_row_processing_time = rows_imported / total_time
             print(f'\nExport complete, output file: {export_dest}\n'
-                  f'{rows_received} rows exported in {total_time:.2f} seconds (~{avg_row_processing_time:.2f} rps) '
+                  f'{rows_imported} rows exported in {total_time:.2f} seconds (~{avg_row_processing_time:.2f} rps) '
                   f'in {request_count} request(s), max consumed capacity: {max_capacity}')
 
     elif arguments['import']:
         input_source, import_type = check_input_output_target(arguments['--file'], arguments['--format'])
         write_capacity = 0
         target_table_name = arguments['<TABLE>']
+
+        file_format = arguments['--format'] or os.path.splitext(arguments['--file'])
+        if file_format.lower() != "json":
+            print("Only JSON import file types are supported.")
+            sys.exit()
+
         print('Importing {} to table {} ({} write capacity)'.format(input_source,
                                                                     target_table_name,
-                                                                    write_capacity))
+                                                                    write_capacity or "infinite"))
+        start = timeit.default_timer()
+        rows_imported = 0
+
         if import_type == 'file':
-            done = False
-            request_count = 0
-            rows_received = 0
-            max_capacity = 0
-            retries = 0
-            start = timeit.default_timer()
-            while not done:
-                try:
-                    request_count += 1
-                    with open(input_source, 'r') as fp:
-                        # print(obj.key)
-                        # response = obj.get()
-                        # data = response['Body'].read().decode('utf-8')
-                        prepared_data = [{'PutRequest': {'Item': json.loads(x)}} for x in fp.readlines()]
-                        rows_received = len(prepared_data)
-                        print('Importing {} records'.format(rows_received))
-                        for chunk in chunks(prepared_data, 25):
-                            response = dynamodb.batch_write_item(RequestItems={target_table_name: chunk})
-                            print(".", end='', flush=True)
-                            unprocessed_items = response.get('UnprocessedItems')
-                            while unprocessed_items:
-                                response = dynamodb.batch_write_item(RequestItems=unprocessed_items)
-                                if response.get('UnprocessedItems'):
-                                    unprocessed_items = response.get('UnprocessedItems')
-                                    print('<', end='', flush=True)
-                                    time.sleep(2 ** retries)
-                                    retries += 1
 
-                    done = True
+            table = ddb_resource.Table(target_table_name)
+            import_data = json.load(open(input_source, 'r'))
+            with table.batch_writer() as batch:
+                for item in import_data:
+                    batch.put_item(Item=item)
+                    print(".", end='', flush=True)
+                    rows_imported += 1
 
-                except ClientError as err:
-                    if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
-                                                             'ThrottlingException'):
-                        raise
-                    print('<' * retries)
-                    time.sleep(2 ** retries)
-                    retries += 1
-
-                stop = timeit.default_timer()
-                total_time = stop - start
-                avg_row_processing_time = rows_received / total_time
-                print('\nImport complete: {} rows imported in {:.2f} seconds (~{:.2f} rps) '
-                      'in {} request(s), max consumed capacity: {}'.format(rows_received,
-                                                                           total_time,
-                                                                           avg_row_processing_time,
-                                                                           request_count,
-                                                                           max_capacity))
         elif import_type == 'S3':
-            bucket = s3.Bucket(input_source)
-            done = False
-            request_count = 0
-            rows_received = 0
-            max_capacity = 0
-            retries = 0
-            start = timeit.default_timer()
-            while not done:
-                try:
-                    request_count += 1
-                    for obj in bucket.objects.all():
-                        print(obj.key)
-                        response = obj.get()
-                        data = response['Body'].read().decode('utf-8')
-                        prepared_data = [{'PutRequest': {'Item': json.loads(x)}} for x in data.splitlines()]
-                        for chunk in chunks(prepared_data, 25):
-                            dynamodb.batch_write_item(RequestItems={target_table_name: chunk})
+            print(f"S3 import not yet supported")
 
-                    done = True
-
-                    # consumed_capacity = result['ConsumedCapacity']['CapacityUnits']
-                    # max_capacity = max(max_capacity, consumed_capacity)
-                    #
-                    # if consumed_capacity / write_capacity >= 0.9:
-                    #     print("!", end='', flush=True)
-                    # elif consumed_capacity / write_capacity >= 0.65:
-                    #     print("*", end='', flush=True)
-                    # else:
-                    #     print(".", end='', flush=True)
-
-                except ClientError as err:
-                    if err.response['Error']['Code'] not in ('ProvisionedThroughputExceededException',
-                                                             'ThrottlingException'):
-                        raise
-                    print('<' * retries)
-                    time.sleep(2 ** retries)
-                    retries += 1
-
-            stop = timeit.default_timer()
-            total_time = stop - start
-            avg_row_processing_time = rows_received / total_time
-            print('\nImport complete: {} rows imported in {:.2f} seconds (~{:.2f} rps) '
-                  'in {} request(s), max consumed capacity: {}'.format(rows_received,
-                                                                       total_time,
-                                                                       avg_row_processing_time,
-                                                                       request_count,
-                                                                       max_capacity))
+        stop = timeit.default_timer()
+        total_time = stop - start
+        print('\nImport complete: {} rows imported in {:.2f} seconds'.format(rows_imported,
+                                                                             total_time))
     elif arguments['wipe']:
         table_name = arguments['<TABLE>']
         print('Wiping table {} (via remove and recreate)'.format(table_name))
-        response = dynamodb.describe_table(TableName=table_name)
+        response = ddb_client.describe_table(TableName=table_name)
         table_definition = extract_table_definition(response['Table'])
         print(' - Removing table')
-        response = dynamodb.delete_table(TableName=table_name)
-        dynamodb.get_waiter('table_not_exists').wait(TableName=table_name)
+        response = ddb_client.delete_table(TableName=table_name)
+        ddb_client.get_waiter('table_not_exists').wait(TableName=table_name)
         print(' - Table Removed, Recreating')
-        response = dynamodb.create_table(**table_definition)
-        dynamodb.get_waiter('table_exists').wait(TableName=table_name)
+        response = ddb_client.create_table(**table_definition)
+        ddb_client.get_waiter('table_exists').wait(TableName=table_name)
         print(' - Table recreated, finished')
     elif arguments['truncate']:
         table_name = arguments['<TABLE>']
