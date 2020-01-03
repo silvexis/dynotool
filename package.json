@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "serverless": "^1.36.1",
-    "serverless-cf-vars": "^0.3.0"
-  }
-}
