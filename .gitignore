@@ -1,11 +1,7 @@
-*.py[cod]
-__pycache__
-.DS_Store
-
 # C extensions
 *.so
 
-# Packages
+# Python Stuff
 *.egg
 *.egg-info
 dist
@@ -19,6 +15,9 @@ develop-eggs
 lib
 lib64
 wheelhouse
+.python-version
+*.py[cod]
+__pycache__
 
 # Installer logs
 pip-log.txt
@@ -32,12 +31,6 @@ htmlcov
 junit.xml
 .cache
 
-# Code stats
-clonedigger.xml
-
-# Translations
-*.mo
-
 # Complexity
 output/*.html
 output/*/index.html
@@ -49,19 +42,15 @@ docs/_build
 .idea
 *~
 
-# py.test
-pytestdebug.log
-
-# dynamodb local
+# Local DB
 *.db
 *.sqlite
 
-# Vagrant
-.vagrant/
-
-#junk
+# junk
 *.pid
 *.backup
+.DS_Store
 
+# Packaging
 node_modules
 .serverless
