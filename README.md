@@ -52,4 +52,4 @@ Usage
         --filter <filter>       A filter to apply to the operation. The syntax depends on the operation.
 
 
-Copyright 2020 CloudZero, Inc.
+Copyright 2021 Erik Peterson
